@@ -12,17 +12,13 @@ import time
 
 from utils import *
 
-class GazeboEnv:
+class RobomasterEnv:
     def __init__(self):
         #Set up publishers for motion
         self.pub_cmd_vel = [rospy.Publisher('roborts_{0}/cmd_vel_acc'.format(i + 1), TwistAccel, queue_size=1) for i in range(4)]
         self.cmd_vel = [TwistAccel() for i in range(4)]
         self.pub_gimbal_angle = [rospy.Publisher('roborts_{0}/cmd_gimbal_angle'.format(i + 1), GimbalAngle, queue_size=1) for i in range(4)]
         self.cmd_gimbal = [GimbalAngle() for i in range(4)]
-
-        #Set up subscribers for state
-        self.sub_odom = [rospy.Subscriber('roborts_{0}/ground_truth/state'.format(i+1), Odometry, self.odometry_callback) for i in range(4)]
-        self.sub_gimbal_angle = [rospy.Subscriber('roborts_{0}/joint_states'.format(i+1), JointState, self.gimbal_angle_callback) for i in range(4)]
 
         #Set up state parameters
         self._odom_info = [[None]] * 4 
@@ -32,21 +28,16 @@ class GazeboEnv:
         self._barrel_heat = [[0], [0], [0], [0]]
         self._launch_velocity_max = 25
         self._shoot = [0, 0, 0, 0]
-        self._armor_plate_damage = [20, 40, 40, 60]
-        
-        #Amount of time running per timestep
-        self._running_step = 0.1
-        #Max number of timesteps
-        self._timestep = 0
-        self._max_timesteps = 1000 
-        #Conversion from timestep to real time
-        self._real_time_conversion = 1
 
-        #Robot parameters
+        #Robot constants
         def diag_stats_helper(l, w):
             angle = math.atan(w / l)
             return angle, w / math.sin(angle) / 2
-        
+
+        self.robot_coords = [None] * 4
+        self.robot_plates_coords = [None] * 4
+
+        #Robot parameters
         self.robot_length, self.robot_width = 0.550, 0.420
         self.robot_diag_angle, self.robot_diag_length = diag_stats_helper(self.robot_length, self.robot_width)
 
@@ -58,39 +49,52 @@ class GazeboEnv:
         self.sideway_frame_width = self.robot_width + self.armor_thickness * 2
         self.sideway_frame_diag_angle, self.sideway_frame_diag_length = diag_stats_helper(self.armor_size, self.sideway_frame_width)
 
-        ################################### Exportables to Pymunk ########################################
         self.gimbal_angle_range = 82.5 / 180 * math.pi
-        self.gimbal_shoot_range = float('inf') # more on this later
 
-        self.robot_coords = [None] * 4
-        self.robot_plates_coords = [None] * 4     
+        # more on this later
+        self.gimbal_shoot_range = float('inf')
+        #Set up subscribers for state
+        self.sub_odom = [rospy.Subscriber('roborts_{0}/ground_truth/state'.format(i+1), Odometry, self.odometry_callback) for i in range(4)]
+        self.sub_gimbal_angle = [rospy.Subscriber('roborts_{0}/joint_states'.format(i+1), JointState, self.gimbal_angle_callback) for i in range(4)]
+
+        #Amount of time running per timestep
+        self._running_step = 0.1
+
+        #Max number of timesteps
+        self._timestep = 0
+        self._max_timesteps = 1000 
+
+        #Conversion from timestep to real time
+        self._real_time_conversion = 1
 
         #Gives coordinates for the obstacles:
-        #x-start, x-end, y-start, y-end
+        #x-start, y-start, x-end, y-end
         self.parallel_obstacles = [
-            (1.500, 1.750, 0, 1.000),
-            (3.600, 4.600, 1.000, 1.250),
-            (7.100, 8.100, 1.000, 1.250),
-            (1.500, 2.300, 2.425, 2.675),
-            (5.800, 6.600, 2.425, 2.675),
-            (0.000, 1.000, 3.850, 4.100),
-            (3.500, 4.500, 3.850, 4.100),
-            (6.350, 6.600, 4.100, 5.100),
+            (1.500, 0, 1.750, 1.000),
+            (3.600, 1.000, 4.600, 1.250),
+            (7.100, 1.000, 8.100, 1.250),
+            (1.500, 2.425, 2.300, 2.675),
+            (5.800, 2.425, 6.600, 2.675),
+            (0.000, 3.850, 1.000, 4.100),
+            (3.500, 3.850, 4.500, 4.100),
+            (6.350, 4.100, 6.600, 5.100),
         ]
         #points [top, middle, end, left, middle, right]
-        diagonal_len = 300 / math.sqrt(2)
+        diagonal_len = .300 / math.sqrt(2)
         self.center_obstacle = (4.050 - diagonal_len, 4.050, 4.050 + diagonal_len, 2.550 - diagonal_len, 2.550, 2.550 + diagonal_len)
         
         # initialize segments of each obstacle for blocking calculation
         # buffer is added
         segments = []
         buffer = 0.015
-        for xl, xr, yb, yt in self.parallel_obstacles:
+        for xl, yb, xr, yt in self.parallel_obstacles:
             xr, xr, yb, yt = xr - buffer, xr + buffer, yb - buffer, yt + buffer
             segments.extend([(xl, yb, xl, yt), (xl, yb, xr, yb), (xr, yt, xr, yb), (xr, yt, xl, yt)])
         top, hmid, bot, left, vmid, right = self.center_obstacle
         segments.extend([(left - buffer, hmid, right + buffer, hmid), (vmid, bot - buffer, vmid, top + buffer)])
         self.segments = segments
+
+        self.armor_plate_damage = [20, 40, 40, 60]
 
         self._zones = [
         [3.830, 4.370, 0.270, 0.750],
@@ -99,7 +103,6 @@ class GazeboEnv:
         [4.350, 4.830, 4.500, 5.040], 
         [5.330, 7.870, 1.500, 1.980],
         [5.930, 6.470, 2.925, 3.405]]
-        #####################################################################################################
         self._zones_active = [False] * 6
 
         #Zone Types:
@@ -136,8 +139,6 @@ class GazeboEnv:
         pass
 
     def robot_coords_from_odom(self, odom_info):
-        if not odom_info:
-            return
         x, y, z, yaw = odom_info
         coords = []
         for angle in (yaw + self.robot_diag_angle, yaw + math.pi - self.robot_diag_angle, yaw + math.pi + self.robot_diag_angle, yaw - self.robot_diag_angle):
@@ -151,8 +152,6 @@ class GazeboEnv:
         return (0, 1)
 
     def plate_coords_from_odom(self, odom_info):
-        if not odom_info:
-            return
         x, y, z, yaw = odom_info
         frontx1off, fronty1off = math.cos(yaw + self.forward_frame_diag_angle) * self.forward_frame_diag_length, math.sin(yaw + self.forward_frame_diag_angle) * self.forward_frame_diag_length
         frontx2off, fronty2off = math.cos(yaw - self.forward_frame_diag_angle) * self.forward_frame_diag_length, math.sin(yaw - self.forward_frame_diag_angle) * self.forward_frame_diag_length
@@ -167,11 +166,9 @@ class GazeboEnv:
                 (x + rightx1off, y + righty1off, x + rightx2off, y + righty2off),
                 (x + backx1off, y + backy1off, x + backx2off, y + backy2off)]
 
-    def update_robot_coords(self):
-        self.robot_coords = [self.robot_coords_from_odom(self._odom_info[0]), self.robot_coords_from_odom(self._odom_info[1]), \
-            self.robot_coords_from_odom(self._odom_info[2]), self.robot_coords_from_odom(self._odom_info[3])]
-        self.robot_plates_coords = [self.plate_coords_from_odom(self._odom_info[0]), self.plate_coords_from_odom(self._odom_info[1]), \
-            self.plate_coords_from_odom(self._odom_info[2]), self.plate_coords_from_odom(self._odom_info[3])]
+    def update_robot_coords(self, _id):
+        self.robot_coords[_id] = self.robot_coords_from_odom(self._odom_info[_id])
+        self.robot_plates_coords[_id] = self.plate_coords_from_odom(self._odom_info[_id])
 
     # pass in from_robot_index so it doesn't check for the robot itself!
     # otherwise, each robot blocks its own line-of-sight
@@ -197,17 +194,18 @@ class GazeboEnv:
             x1, y1, x2, y2 = self.robot_plates_coords[enemy1][index]
             if distance(x, y, x1, y1) < self.gimbal_shoot_range and distance(x, y, x2, y2) < self.gimbal_shoot_range and angleDiff(angleTo(x, y, x1, y1), yaw) <= self.gimbal_angle_range and angleDiff(angleTo(x, y, x2, y2), yaw) <= self.gimbal_angle_range:
                 if not self.is_line_of_sight_blocked(x, y, x1, y1, robot_index) and not self.is_line_of_sight_blocked(x, y, x2, y2, robot_index):
-                    visible.extend([(enemy1, self._armor_plate_damage[index], angleBetween(x, y, x1, y1, x2, y2))])
+                    visible.extend([(enemy1, self.armor_plate_damage[index], angleBetween(x, y, x1, y1, x2, y2))])
         for index in range(4):
             x1, y1, x2, y2 = self.robot_plates_coords[enemy2][index]
             if distance(x, y, x1, y1) < self.gimbal_shoot_range and distance(x, y, x2, y2) < self.gimbal_shoot_range and angleDiff(angleTo(x, y, x1, y1), yaw) <= self.gimbal_angle_range and angleDiff(angleTo(x, y, x2, y2), yaw) <= self.gimbal_angle_range:
                 if not self.is_line_of_sight_blocked(x, y, x1, y1, robot_index) and not self.is_line_of_sight_blocked(x, y, x2, y2, robot_index):
-                    visible.extend([(enemy2, self._armor_plate_damage[index], angleBetween(x, y, x1, y1, x2, y2))])
+                    visible.extend([(enemy2, self.armor_plate_damage[index], angleBetween(x, y, x1, y1, x2, y2))])
         return visible
 
     def odometry_callback(self, msg):
-        self._odom_info[int(msg._connection_header['topic'][9]) - 1] = [msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z, self.quaternion_to_euler(msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w)[2]]
-        self.update_robot_coords()
+        _id = int(msg._connection_header['topic'][9]) - 1
+        self._odom_info[_id] = [msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z, self.quaternion_to_euler(msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w)[2]]
+        self.update_robot_coords(_id)
 
     def gimbal_angle_callback(self, msg):
         self._gimbal_angle_info[int(msg._connection_header['topic'][9]) - 1] = msg.position 
@@ -375,7 +373,7 @@ class GazeboEnv:
 
 if __name__ == '__main__':  
     rospy.init_node('gym_env_node')
-    env = GazeboEnv()
+    env = RobomasterEnv()
     for i in range(1000):
         state, reward, done, info = env.step([0, 1, 0, 0, 0, 0, -1, 0], [0, 0, -1, 0, 0, 0, 1, 0])
         time.sleep(0.01)

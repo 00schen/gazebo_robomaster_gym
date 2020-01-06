@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+    <node name="gym" pkg="gazebo_robomaster_gym" type="robomaster_env.py"/>
+</launch>

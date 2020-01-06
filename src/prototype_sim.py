@@ -3,6 +3,7 @@ mouse, and hitting obstacles on the way.
 """
 
 import random
+from math import *
 
 import pygame
 from pygame.locals import *
@@ -15,24 +16,6 @@ from gym_env import *
 
 RATIO = .10
 SCREEN = (int(8100*RATIO), int(5100*RATIO))
-
-def add_box(space, size, mass):
-    radius = Vec2d(size, size).length
-
-    body = pymunk.Body()
-    space.add(body)
-
-    body.position = Vec2d(
-        random.random()*(640 - 2*radius) + radius, 
-        random.random()*(480 - 2*radius) + radius
-    )
-    
-    shape = pymunk.Poly.create_box(body, (size, size), 0.0)
-    shape.mass = mass
-    shape.friction = 0.7
-    space.add(shape)
-    
-    return body
 
 class PymunkEnv(RobomasterEnv):
     def __init__(self):
@@ -71,17 +54,24 @@ class PymunkEnv(RobomasterEnv):
             shape.color = (0,255,255,255)
             space.add(shape)
 
+        self._tank_bodies = [generate_tank(space,(500,500)), generate_tank(space,(500,4600)), generate_tank(space,(7600,500)), generate_tank(space,(7600,4600))]
+        self.space = space
+
+    def generate_tank(space, center):
         # We joint the tank to the control body and control the tank indirectly by modifying the control body.
-        global tank_control_body
         tank_control_body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
         tank_control_body.position = 320, 240
         space.add(tank_control_body)
-        global tank_body
-        tank_body = add_box(space, 30, 10)
-        tank_body.position = 320, 240
+        tank_body = pymunk.Body()
+        space.add(tank_body)
+        shape = pymunk.Poly.create_box(tank_body, (550*RATIO, 420*RATIO), 0.0)
+        shape.mass = 1
+        shape.friction = 10
+        space.add(shape)
+        tank_body.position = int(center[0]*RATIO),int(center[1]*RATIO)
         for s in tank_body.shapes:
             s.color = (0,255,100,255)
-        
+
         pivot = pymunk.PivotJoint(tank_control_body, tank_body, (0,0), (0,0))
         space.add(pivot)
         pivot.max_bias = 0 # disable joint correction
@@ -92,35 +82,59 @@ class PymunkEnv(RobomasterEnv):
         gear.error_bias = 0 # attempt to fully correct the joint each step
         gear.max_bias = 1.2  # but limit it's angular correction rate
         gear.max_force = 50000 # emulate angular friction
+        return (tank_body, tank_control_body)
 
-        self.space = space
+    def step(self, action1, action2):
+        super.step(action1, action2)
+        
+
 
     def update(self, dt, surface):
-        global tank_body
-        global tank_control_body
+        tank_body = self.tank_body
+        tank_control_body = self.tank_control_body
         self._odom_info = [tuple(list(tank_body.position)+[0,tank_body.angle]) for _ in range(4)]
         self.update_robot_coords()
         space = self.space
-
-        mpos = pygame.mouse.get_pos()
-        mouse_pos = pymunk.pygame_util.from_pygame( Vec2d(mpos), surface )
-
-        mouse_delta = mouse_pos - tank_body.position
-        turn = tank_body.rotation_vector.cpvunrotate(mouse_delta).angle
-        tank_control_body.angle =  tank_body.angle - turn
         
-        # drive the tank towards the mouse
-        if ((mouse_pos - tank_body.position).get_length_sqrd() < 30**2):
-            tank_control_body.velocity = 0,0
-        else:
-            if mouse_delta.dot(tank_body.rotation_vector) > 0.0:
+        mouse_delta = Vec2d(0,0) # mouse_delta exact length does not matter
+        pressed = pygame.key.get_pressed()
+        if pressed[pygame.K_a]:
+            mouse_delta = Vec2d(-1,0)
+        if pressed[pygame.K_q]:
+            mouse_delta = Vec2d(-1,1)
+        if pressed[pygame.K_w]:
+            mouse_delta = Vec2d(0,1)
+        if pressed[pygame.K_e]:
+            mouse_delta = Vec2d(1,1)
+        if pressed[pygame.K_d]:
+            mouse_delta = Vec2d(1,0)
+        if pressed[pygame.K_x]:
+            mouse_delta = Vec2d(1,-1)
+        if pressed[pygame.K_s]:
+            mouse_delta = Vec2d(0,-1)
+        if pressed[pygame.K_z]:
+            mouse_delta = Vec2d(-1,-1)
+
+        if mouse_delta.get_length_sqrd() > 0:
+            if abs((tank_body.angle-mouse_delta.angle)%pi) < abs((tank_body.angle-(mouse_delta.angle+pi)%pi)):
+                tank_control_body.angle = mouse_delta.angle
+                active_rotation_vector = tank_body.rotation_vector
+            else:
+                tank_control_body.angle = (mouse_delta.angle+pi)%pi
+                active_rotation_vector = tank_body.rotation_vector.cpvrotate(Vec2d(-1,0))
+
+            if mouse_delta.dot(active_rotation_vector) > 0.0:
                 direction = 1.0 
             else:
                 direction = -1.0
             dv = Vec2d(30.0*direction, 0.0)
-            tank_control_body.velocity = tank_body.rotation_vector.cpvrotate(dv)
+            tank_control_body.velocity = active_rotation_vector.cpvrotate(dv)
+        else:
+            tank_control_body.angle = tank_body.angle
+            tank_control_body.velocity = 0,0
         
         space.step(dt)
+
 
 env = PymunkEnv()
 pygame.init()
@@ -135,8 +149,7 @@ text = font.render(text, 1, pygame.color.THECOLORS["white"])
 
 while True:
     for event in pygame.event.get():
-        if event.type == QUIT or \
-            event.type == KEYDOWN and (event.key in [K_ESCAPE, K_q]): 
+        if event.type == QUIT or pygame.key.get_pressed()[K_ESCAPE]: 
             exit()
     
     screen.fill(pygame.color.THECOLORS["black"])
